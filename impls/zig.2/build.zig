@@ -23,15 +23,26 @@ pub fn build(b: *Builder) void {
     for (steps) |step, i| {
         const name = b.fmt("step{X}_{s}", .{ i, step });
         const fname = b.fmt("src/{s}.zig", .{name});
-        const xtable = b.addExecutable(name, fname);
-        xtable.setTarget(target);
-        xtable.setBuildMode(mode);
+        const exe = b.addExecutable(name, fname);
+        exe.setTarget(target);
+        exe.setBuildMode(mode);
 
-        const i_step = b.addInstallArtifact(xtable);
+        const i_step = b.addInstallArtifact(exe);
         const l_step = LinkStep.init(b, b.fmt("zig-out/bin/{s}", .{name}), name);
         l_step.step.dependOn(&i_step.step);
         const b_step = b.step(name, "");
         b_step.dependOn(&l_step.step);
+    }
+
+    const test_step = b.step("test", "Run unit tests");
+    const test_files = [_][]const u8{
+        "src/reader.zig",
+    };
+    for (test_files) |file| {
+        const itest = b.addTest(file);
+        itest.setTarget(target);
+        itest.setBuildMode(mode);
+        test_step.dependOn(&itest.step);
     }
 }
 
