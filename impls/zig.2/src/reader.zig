@@ -187,7 +187,7 @@ fn readForm(self: *Self) Error!MalType {
             if (try self.readList()) |list| {
                 return MalType{ .list = list };
             } else {
-                return MalType.nil;
+                return .nil;
             }
         } else {
             return MalType{ .atom = try self.readAtom() };
@@ -223,10 +223,10 @@ fn readList(self: *Self) Error!?[]MalType {
         }
         break :blk cnt;
     };
-    if (num_child == 0) return null;
     // get rid of wrapping parens
     _ = self.next();
     defer _ = self.next();
+    if (num_child == 0) return null;
     var ml = try self.allocator.alloc(MalType, num_child);
     var i: usize = 0;
     while (i < num_child) : (i += 1) {
@@ -351,6 +351,17 @@ test "readForm" {
                             },
                         },
                     },
+                },
+            },
+        },
+        .{
+            .input = "(() 3 () ())",
+            .expected = .{
+                .list = &.{
+                    .nil,
+                    .{ .atom = .{ .num = 3 } },
+                    .nil,
+                    .nil,
                 },
             },
         },
