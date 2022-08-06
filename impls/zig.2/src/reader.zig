@@ -1,24 +1,27 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const types = @import("types.zig");
+const MalType = types.MalType;
+const MalAtom = types.MalAtom;
 
 allocator: Allocator,
 tokens: std.ArrayList([]const u8),
 pos: usize = 0,
 
 const Self = @This();
-const Error = error{
+pub const Error = error{
     TokenizeError,
     ParseError,
 } || Allocator.Error;
 
-fn init(allocator: Allocator) Self {
+pub fn init(allocator: Allocator) Self {
     return .{
         .allocator = allocator,
         .tokens = std.ArrayList([]const u8).init(allocator),
     };
 }
 
-fn deinit(self: *Self) void {
+pub fn deinit(self: *Self) void {
     self.tokens.deinit();
 }
 
@@ -33,9 +36,9 @@ fn peek(self: *const Self) ?[]const u8 {
     return self.tokens.items[self.pos];
 }
 
-fn readStr(self: *Self, str: []const u8) MalType {
-    self.tokenize(str);
-    self.readForm();
+pub fn readStr(self: *Self, str: []const u8) Error!MalType {
+    try self.tokenize(str);
+    return try self.readForm();
 }
 
 // TODO: deduplicate all this junk..
@@ -55,18 +58,22 @@ fn tokenize(self: *Self, str: []const u8) Error!void {
         } else if (std.mem.indexOfScalar(u8, special, str_slice[0]) != null) {
             try self.tokens.append(str_slice[0..1]);
             str_slice = str_slice[1..];
-        } else if (str_slice[0] == '"') {
-            var offset: usize = 1;
-            while (true) {
-                // if null, unbalanced string
-                const ind = std.mem.indexOfScalarPos(u8, str_slice, offset, '"') orelse return Error.TokenizeError;
-                offset = ind;
-                if (str_slice[ind - 1] != '\\') break;
-                offset += 1;
-            }
-            try self.tokens.append(str_slice[0 .. offset + 1]);
-            str_slice = str_slice[offset + 1 ..];
-        } else if (str_slice[0] == ';') {
+        }
+        // else if (str_slice[0] == '"') {
+            // var offset: usize = 1;
+            // while (true) {
+                // // if null, unbalanced string
+                // const ind = std.mem.indexOfScalarPos(u8, str_slice, offset, '"') orelse return Error.TokenizeError;
+                // offset = ind;
+                // const cur = str_slice[0..offset];
+                // const wo_esc = std.mem.trimRight(u8, cur, "\\");
+                // if ((cur.len - wo_esc.len) % 2 == 0) break;
+                // offset += 1;
+            // }
+            // try self.tokens.append(str_slice[0 .. offset + 1]);
+            // str_slice = str_slice[offset + 1 ..];
+        // }
+        else if (str_slice[0] == ';') {
             if (std.mem.indexOfScalar(u8, str_slice, '\n')) |ind| {
                 try self.tokens.append(str_slice[0..ind]);
                 str_slice = str_slice[ind..];
@@ -144,18 +151,30 @@ test "tokenizer" {
                 ")",
             },
         },
-        .{
-            .input = "\"a\"",
-            .expected = &.{
-                "\"a\"",
-            },
-        },
-        .{
-            .input = "\"a\\\"\"",
-            .expected = &.{
-                "\"a\\\"\"",
-            },
-        },
+        // .{
+            // .input = "\"a\"",
+            // .expected = &.{
+                // "\"a\"",
+            // },
+        // },
+        // .{
+            // .input = "\"a\\\"\"",
+            // .expected = &.{
+                // "\"a\\\"\"",
+            // },
+        // },
+        // .{
+            // .input = "\\\\",
+            // .expected = &.{
+                // "\\\\",
+            // },
+        // },
+        // .{
+            // .input = "\"\\\\\\\\\"",
+            // .expected = &.{
+                // "\"\\\\\"",
+            // },
+        // },
     };
 
     for (cases) |case| {
@@ -165,21 +184,10 @@ test "tokenizer" {
         const res = reader.tokens.items;
         try std.testing.expectEqual(exp.len, res.len);
         for (exp) |_, i| {
-            try std.testing.expectEqualSlices(u8, exp[i], res[i]);
+            try std.testing.expectEqualStrings(exp[i], res[i]);
         }
     }
 }
-
-const MalType = union(enum) {
-    list: []const MalType,
-    atom: MalAtom,
-    nil,
-};
-
-const MalAtom = union(enum) {
-    num: i64,
-    sym: []const u8,
-};
 
 fn readForm(self: *Self) Error!MalType {
     if (self.peek()) |tok| {
@@ -187,13 +195,13 @@ fn readForm(self: *Self) Error!MalType {
             if (try self.readList()) |list| {
                 return MalType{ .list = list };
             } else {
-                return .nil;
+                return MalType{ .atom = .nil };
             }
         } else {
             return MalType{ .atom = try self.readAtom() };
         }
     } else {
-        return .nil;
+        return MalType{ .atom = .nil };
     }
 }
 
@@ -219,9 +227,11 @@ fn readList(self: *Self) Error!?[]MalType {
                 ')' => depth -= 1,
                 else => {},
             }
-            if (depth == 0) break;
+            if (depth == 0) {
+                break :blk cnt;
+            }
         }
-        break :blk cnt;
+        return Error.ParseError;
     };
     // get rid of wrapping parens
     _ = self.next();
@@ -235,7 +245,7 @@ fn readList(self: *Self) Error!?[]MalType {
     return ml;
 }
 
-fn destroy(self: *Self, form: *const MalType) void {
+pub fn destroy(self: *Self, form: *const MalType) void {
     if (std.meta.activeTag(form.*) == .list) {
         for (form.list) |subform| {
             self.destroy(&subform);
@@ -264,12 +274,9 @@ fn equal(a: MalType, b: MalType) bool {
             const b_atm_tag = std.meta.activeTag(b.atom);
             if (a_atm_tag != b_atm_tag) return false;
             switch (a_atm_tag) {
-                .num => return a.atom.num == b.atom.num,
                 .sym => return std.mem.eql(u8, a.atom.sym, b.atom.sym),
+                else => return std.meta.eql(a, b),
             }
-        },
-        .nil => {
-            return b == .nil;
         },
     }
 }
@@ -285,7 +292,7 @@ test "readForm" {
     const cases = [_]Case{
         .{
             .input = "",
-            .expected = .nil,
+            .expected = .{ .atom = .nil },
         },
         .{
             .input = "8",
@@ -358,16 +365,16 @@ test "readForm" {
             .input = "(() 3 () ())",
             .expected = .{
                 .list = &.{
-                    .nil,
+                    .{ .atom = .nil },
                     .{ .atom = .{ .num = 3 } },
-                    .nil,
-                    .nil,
+                    .{ .atom = .nil },
+                    .{ .atom = .nil },
                 },
             },
         },
         .{
             .input = "()",
-            .expected = .nil,
+            .expected = .{ .atom = .nil },
         },
     };
 

@@ -28,7 +28,11 @@ pub fn build(b: *Builder) void {
         exe.setBuildMode(mode);
 
         const i_step = b.addInstallArtifact(exe);
-        const l_step = LinkStep.init(b, b.fmt("zig-out/bin/{s}", .{name}), name);
+        const l_step = LinkStep.init(
+            b,
+            b.fmt("{s}/bin/{s}", .{ b.install_path, name }),
+            b.fmt("{s}/{s}", .{ b.build_root, name }),
+        );
         l_step.step.dependOn(&i_step.step);
         const b_step = b.step(name, "");
         b_step.dependOn(&l_step.step);
