@@ -326,6 +326,7 @@ pub fn destroy(form: *const T.MalType, alloc: Allocator) void {
         .list => |l| destroyList(l, alloc),
         .atom => |a| switch (a) {
             .vector => |v| destroyVec(v, alloc),
+            .hash => |h| destroyHash(&h, alloc),
             else => {},
         },
     }
@@ -348,12 +349,13 @@ fn destroyVec(vec: std.ArrayList(T.MalType), alloc: Allocator) void {
     vec.deinit();
 }
 
-fn destroyHash(hash: *std.StringHashMap(T.MalType), alloc: Allocator) void {
+fn destroyHash(hash: *const std.StringHashMap(T.MalType), alloc: Allocator) void {
     var v_iter = hash.valueIterator();
     while (v_iter.next()) |v| {
         destroy(v, alloc);
     }
-    hash.deinit();
+    const hash_ptr = @intToPtr(*std.StringHashMap(T.MalType), @ptrToInt(hash));
+    hash_ptr.deinit();
 }
 
 // move to types
@@ -602,4 +604,11 @@ test "parser errors" {
             return e;
         };
     }
+}
+
+test "hash - leak detection" {
+    var reader = Self.init(std.testing.allocator);
+
+    const res = try reader.readStr("{:a {:b {:c 3}}}");
+    defer destroy(&res, reader.allocator);
 }
