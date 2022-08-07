@@ -28,14 +28,14 @@ pub fn Printer(comptime Writer: type) type {
                         .nil => {
                             try self.writer.print("NIL", .{});
                         },
-                        .sym => |s| {
+                        .sym, .str, .keyword => |s| {
                             try self.writer.print("{s}", .{s});
-                        },
-                        .keyword => |k| {
-                            try self.writer.print(":{s}", .{k});
                         },
                         .num => |n| {
                             try self.writer.print("{}", .{n});
+                        },
+                        .bool => |b| {
+                            try self.writer.print("{}", .{b});
                         },
                         .vector => |v| {
                             try self.writer.print("[", .{});
@@ -46,7 +46,23 @@ pub fn Printer(comptime Writer: type) type {
                                 try self.prStrNonRoot(e);
                             }
                             try self.writer.print("]", .{});
-                        }
+                        },
+                        .hash => |h| {
+                            // is there a better way to print braces?
+                            try self.writer.print("{c}", .{'{'});
+                            var e_iter = h.iterator();
+                            var first = true;
+                            while (e_iter.next()) |e| {
+                                if (first) {
+                                    first = false;
+                                } else {
+                                    try self.writer.print(" ", .{});
+                                }
+                                try self.writer.print("{s} ", .{ e.key_ptr.* });
+                                try self.prStrNonRoot(e.value_ptr.*);
+                            }
+                            try self.writer.print("{c}", .{'}'});
+                        },
                     }
                 },
             }

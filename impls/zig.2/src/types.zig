@@ -13,8 +13,11 @@ pub const MalType = union(enum) {
 pub const MalAtom = union(enum) {
     num: i64,
     sym: []const u8,
+    str: []const u8,
     keyword: []const u8,
     vector: std.ArrayList(MalType),
+    hash: std.StringHashMap(MalType),
+    bool: bool,
     nil,
 };
 
