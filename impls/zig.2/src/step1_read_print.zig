@@ -17,7 +17,7 @@ pub fn main() anyerror!void {
             try stderr.print("Reached EOF. Check for unbalanced tokens.\n", .{});
             continue;
         };
-        defer reader.destroy(&read);
+        defer Reader.destroy(&read, reader.allocator);
         const eval = EVAL(read);
         try PRINT(eval, printer);
     }

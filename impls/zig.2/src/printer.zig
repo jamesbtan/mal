@@ -28,12 +28,25 @@ pub fn Printer(comptime Writer: type) type {
                         .nil => {
                             try self.writer.print("NIL", .{});
                         },
-                        .sym => {
-                            try self.writer.print("{s}", .{form.atom.sym});
+                        .sym => |s| {
+                            try self.writer.print("{s}", .{s});
                         },
-                        .num => {
-                            try self.writer.print("{}", .{form.atom.num});
+                        .keyword => |k| {
+                            try self.writer.print(":{s}", .{k});
                         },
+                        .num => |n| {
+                            try self.writer.print("{}", .{n});
+                        },
+                        .vector => |v| {
+                            try self.writer.print("[", .{});
+                            for (v.items) |e, i| {
+                                if (i != 0) {
+                                    try self.writer.print(" ", .{});
+                                }
+                                try self.prStrNonRoot(e);
+                            }
+                            try self.writer.print("]", .{});
+                        }
                     }
                 },
             }

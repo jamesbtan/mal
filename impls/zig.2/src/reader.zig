@@ -7,8 +7,12 @@ allocator: Allocator,
 const Self = @This();
 pub const Error = error{
     TokenizeError,
-    ParseError,
-} || Allocator.Error;
+} || ParseError || Allocator.Error;
+const ParseError = error{
+    EndOfTokens,
+    InvalidSyntax,
+    MismatchBrace,
+};
 
 pub fn init(allocator: Allocator) Self {
     return .{
@@ -23,26 +27,31 @@ pub fn readStr(self: *Self, str: []const u8) Error!T.MalType {
 
 const TokenIterator = struct {
     str_slice: []const u8,
+    memo: ?[]const u8 = null,
 
     const IterSelf = @This();
 
     pub fn next(self: *IterSelf) Error!?[]const u8 {
-        const slice = (try self.peek()) orelse return null;
+        const slice = (try self.peekAndInvalidate()) orelse return null;
         self.str_slice = self.str_slice[slice.len..];
         return slice;
     }
 
     pub fn peek(self: *IterSelf) Error!?[]const u8 {
+        if (self.memo != null) {
+            return self.memo;
+        }
+
         const allsym = "[]{}()'`~^@, \t\n\r";
         const special = allsym[0..11];
         const whitespace = allsym[11..];
         self.str_slice = std.mem.trimLeft(u8, self.str_slice, whitespace);
         if (self.str_slice.len == 0) {
-            return null;
+            self.memo = null;
         } else if (self.str_slice.len >= 2 and std.mem.eql(u8, self.str_slice[0..2], "~@")) {
-            return self.str_slice[0..2];
+            self.memo = self.str_slice[0..2];
         } else if (std.mem.indexOfScalar(u8, special, self.str_slice[0]) != null) {
-            return self.str_slice[0..1];
+            self.memo = self.str_slice[0..1];
         } else if (self.str_slice[0] == '"') {
             var offset: usize = 1;
             while (true) {
@@ -52,24 +61,31 @@ const TokenIterator = struct {
                 switch (self.str_slice[offset]) {
                     '\\' => offset += 2,
                     '"' => {
-                        return self.str_slice[0 .. offset + 1];
+                        self.memo = self.str_slice[0 .. offset + 1];
+                        break;
                     },
                     else => unreachable,
                 }
             }
         } else if (self.str_slice[0] == ';') { // last 2 are similar?
             if (std.mem.indexOfScalar(u8, self.str_slice, '\n')) |ind| {
-                return self.str_slice[0..ind];
+                self.memo = self.str_slice[0..ind];
             } else {
-                return self.str_slice[0..];
+                self.memo = self.str_slice[0..];
             }
         } else {
             if (std.mem.indexOfAny(u8, self.str_slice, allsym)) |ind| {
-                return self.str_slice[0..ind];
+                self.memo = self.str_slice[0..ind];
             } else {
-                return self.str_slice[0..];
+                self.memo = self.str_slice[0..];
             }
         }
+        return self.memo;
+    }
+
+    fn peekAndInvalidate(self: *IterSelf) Error!?[]const u8 {
+        defer self.memo = null;
+        return self.peek();
     }
 };
 
@@ -185,20 +201,28 @@ test "tokenizer" {
 }
 
 fn readForm(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalType {
-    if (try tok_iter.next()) |tok| {
+    if (try tok_iter.peek()) |tok| {
         if (tok[0] == '(') {
+            _ = try tok_iter.next();
             return T.MalType{ .list = try readList(tok_iter, alloc) };
         } else {
-            return T.MalType{ .atom = try readAtom(tok) };
+            return T.MalType{ .atom = try readAtom(tok_iter, alloc) };
         }
     } else {
         return T.MalType{ .atom = .nil };
     }
 }
 
-fn readAtom(tok: []const u8) Error!T.MalAtom {
-    if (tok[0] == ';') {
-        return .nil;
+fn readAtom(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalAtom {
+    const tok = (try tok_iter.next()) orelse return ParseError.EndOfTokens;
+    switch (tok[0]) {
+        ';' => return .nil,
+        ':' => {
+            if (tok.len == 1) return ParseError.InvalidSyntax;
+            return T.MalAtom{ .keyword = tok[1..] };
+        },
+        '[' => return T.MalAtom{ .vector = try readVec(tok_iter, alloc) },
+        else => {},
     }
     if (std.fmt.parseInt(i64, tok, 10)) |i| {
         return T.MalAtom{ .num = i };
@@ -206,34 +230,102 @@ fn readAtom(tok: []const u8) Error!T.MalAtom {
     return T.MalAtom{ .sym = tok };
 }
 
+fn readVec(tok_iter: *TokenIterator, alloc: Allocator) Error!std.ArrayList(T.MalType) {
+    var vec = std.ArrayList(T.MalType).init(alloc);
+    // replace shallow with deep destroy
+    errdefer destroyVec(vec, alloc);
+
+    while (try tok_iter.peek()) |tok| {
+        switch (tok[0]) {
+            ']' => {
+                _ = try tok_iter.next();
+                break;
+            },
+            ')', '}' => {
+                return ParseError.MismatchBrace;
+            },
+            else => {},
+        }
+        try vec.append(try readForm(tok_iter, alloc));
+    } else {
+        return ParseError.EndOfTokens;
+    }
+    return vec;
+}
+
 fn readList(tok_iter: *TokenIterator, alloc: Allocator) Error!?*T.MalList {
     if (try tok_iter.peek()) |tok| {
-        if (tok[0] == ')') {
-            _ = try tok_iter.next();
-            return null;
+        switch (tok[0]) {
+            ')' => {
+                _ = try tok_iter.next();
+                return null;
+            },
+            ']', '}' => {
+                return ParseError.MismatchBrace;
+            },
+            else => {},
         }
         var ml = try alloc.create(T.MalList);
+        errdefer {
+            ml.*.cdr = null;
+            destroyList(ml, alloc);
+        }
         ml.*.car = try readForm(tok_iter, alloc);
         ml.*.cdr = try readList(tok_iter, alloc);
         return ml;
     } else {
-        return Error.ParseError;
+        return ParseError.EndOfTokens;
     }
 }
 
-pub fn destroy(self: *Self, form: *const T.MalType) void {
-    if (std.meta.activeTag(form.*) != .list) return;
-    var prev: ?*const T.MalList = undefined;
-    var curr: ?*const T.MalList = form.*.list;
-    while (curr != null) {
-        std.mem.swap(?*const T.MalList, &prev, &curr);
-        curr = prev.?.*.cdr;
-        self.destroy(&prev.?.*.car);
-        self.allocator.destroy(prev.?);
+pub fn destroy(form: *const T.MalType, alloc: Allocator) void {
+    switch (form.*) {
+        .list => |l| destroyList(l, alloc),
+        .atom => |a| switch (a) {
+            .vector => |v| destroyVec(v, alloc),
+            else => {},
+        },
     }
+}
+
+fn destroyList(list: ?*const T.MalList, alloc: Allocator) void {
+    var curr = list;
+    while (curr != null) {
+        const next = curr.?.*.cdr;
+        destroy(&curr.?.*.car, alloc);
+        alloc.destroy(curr.?);
+        curr = next;
+    }
+}
+
+fn destroyVec(vec: std.ArrayList(T.MalType), alloc: Allocator) void {
+    for (vec.items) |e| {
+        destroy(&e, alloc);
+    }
+    vec.deinit();
 }
 
 // move to types
+fn equal(a: T.MalType, b: T.MalType) bool {
+    const a_tag = std.meta.activeTag(a);
+    const b_tag = std.meta.activeTag(b);
+    if (a_tag != b_tag) return false;
+    switch (a_tag) {
+        .atom => {
+            const a_atm_tag = std.meta.activeTag(a.atom);
+            const b_atm_tag = std.meta.activeTag(b.atom);
+            if (a_atm_tag != b_atm_tag) return false;
+            switch (a_atm_tag) {
+                .sym, .keyword => return std.mem.eql(u8, a.atom.sym, b.atom.sym),
+                else => return std.meta.eql(a, b),
+            }
+        },
+        .list => {
+            return equalList(a.list, b.list);
+        },
+    }
+}
+
 fn equalList(a: ?*const T.MalList, b: ?*const T.MalList) bool {
     var x: ?*const T.MalList = a;
     var y: ?*const T.MalList = b;
@@ -245,32 +337,12 @@ fn equalList(a: ?*const T.MalList, b: ?*const T.MalList) bool {
     return x == y;
 }
 
-fn equal(a: T.MalType, b: T.MalType) bool {
-    const a_tag = std.meta.activeTag(a);
-    const b_tag = std.meta.activeTag(b);
-    if (a_tag != b_tag) return false;
-    switch (a_tag) {
-        .list => {
-            return equalList(a.list, b.list);
-        },
-        .atom => {
-            const a_atm_tag = std.meta.activeTag(a.atom);
-            const b_atm_tag = std.meta.activeTag(b.atom);
-            if (a_atm_tag != b_atm_tag) return false;
-            switch (a_atm_tag) {
-                .sym => return std.mem.eql(u8, a.atom.sym, b.atom.sym),
-                else => return std.meta.eql(a, b),
-            }
-        },
-    }
-}
-
 test "readForm" {
     var reader = Self.init(std.testing.allocator);
 
     const Case = struct {
         input: []const u8,
-        expected: T.MalType,
+        expected: Error!T.MalType,
     };
     const cases = [_]Case{
         .{
@@ -379,22 +451,75 @@ test "readForm" {
             .input = "()",
             .expected = .{ .list = null },
         },
+        .{
+            .input = "(",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "[",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "[ 1",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "[ 1 2",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "[ [ 1 2 ]",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "((",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "([",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "(()",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "([]",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "(((",
+            .expected = ParseError.EndOfTokens,
+        },
+        .{
+            .input = "((]",
+            .expected = ParseError.MismatchBrace,
+        },
+        .{
+            .input = "((([[]",
+            .expected = ParseError.EndOfTokens,
+        },
     };
     for (cases) |case, i| {
-        const exp = case.expected;
-        const res = try reader.readStr(case.input);
-        defer reader.destroy(&res);
-        std.testing.expect(equal(exp, res)) catch |err| {
-            const stderr = std.io.getStdErr().writer();
-            const Printer = @import("printer.zig").Printer(@TypeOf(stderr));
-            var printer = Printer.init(stderr);
-            std.debug.print("\nINPUT:\n{s}\n\n", .{cases[i].input});
-            std.debug.print("EXPECTED:\n", .{});
-            try printer.prStr(exp);
-            std.debug.print("GOT:\n", .{});
-            try printer.prStr(res);
-            return err;
-        };
+        if (case.expected) |exp| {
+            const res = try reader.readStr(case.input);
+            defer destroy(&res, reader.allocator);
+            std.testing.expect(equal(exp, res)) catch |err| {
+                const stderr = std.io.getStdErr().writer();
+                const Printer = @import("printer.zig").Printer(@TypeOf(stderr));
+                var printer = Printer.init(stderr);
+                std.debug.print("\nINPUT:\n{s}\n\n", .{cases[i].input});
+                std.debug.print("EXPECTED:\n", .{});
+                try printer.prStr(exp);
+                std.debug.print("GOT:\n", .{});
+                try printer.prStr(res);
+                return err;
+            };
+        } else |err| {
+            std.testing.expectError(err, reader.readStr(case.input)) catch |e| {
+                std.debug.print("{s}\n", .{case.input});
+                return e;
+            };
+        }
     }
 }
-
