@@ -4,18 +4,19 @@ const T = @import("types.zig");
 
 allocator: Allocator,
 
+const Self = @This();
 pub const Error = error{
     TokenizeError,
     ParseError,
 } || Allocator.Error;
 
-pub fn init(allocator: Allocator) @This() {
+pub fn init(allocator: Allocator) Self {
     return .{
         .allocator = allocator,
     };
 }
 
-pub fn readStr(self: *@This(), str: []const u8) Error!T.MalType {
+pub fn readStr(self: *Self, str: []const u8) Error!T.MalType {
     var tok_iter = tokenizer(str);
     return try readForm(&tok_iter, self.allocator);
 }
@@ -23,13 +24,15 @@ pub fn readStr(self: *@This(), str: []const u8) Error!T.MalType {
 const TokenIterator = struct {
     str_slice: []const u8,
 
-    pub fn next(self: *@This()) Error!?[]const u8 {
+    const IterSelf = @This();
+
+    pub fn next(self: *IterSelf) Error!?[]const u8 {
         const slice = (try self.peek()) orelse return null;
         self.str_slice = self.str_slice[slice.len..];
         return slice;
     }
 
-    pub fn peek(self: *@This()) Error!?[]const u8 {
+    pub fn peek(self: *IterSelf) Error!?[]const u8 {
         const allsym = "[]{}()'`~^@, \t\n\r";
         const special = allsym[0..11];
         const whitespace = allsym[11..];
@@ -218,7 +221,7 @@ fn readList(tok_iter: *TokenIterator, alloc: Allocator) Error!?*T.MalList {
     }
 }
 
-pub fn destroy(self: *@This(), form: *const T.MalType) void {
+pub fn destroy(self: *Self, form: *const T.MalType) void {
     if (std.meta.activeTag(form.*) != .list) return;
     var prev: ?*const T.MalList = undefined;
     var curr: ?*const T.MalList = form.*.list;
@@ -263,7 +266,7 @@ fn equal(a: T.MalType, b: T.MalType) bool {
 }
 
 test "readForm" {
-    var reader = @This().init(std.testing.allocator);
+    var reader = Self.init(std.testing.allocator);
 
     const Case = struct {
         input: []const u8,

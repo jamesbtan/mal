@@ -1,3 +1,4 @@
+// printer interface kinda jank..
 const types = @import("types.zig");
 
 pub fn Printer(comptime Writer: type) type {

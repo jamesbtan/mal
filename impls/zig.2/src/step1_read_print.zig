@@ -8,7 +8,6 @@ pub fn main() anyerror!void {
     const stdout = std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
     var reader = Reader.init(std.testing.allocator);
-    defer reader.deinit();
     var printer = Printer(@TypeOf(stdout)).init(stdout);
     var buf: [256]u8 = undefined;
     while (true) {
