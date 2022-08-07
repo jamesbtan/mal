@@ -217,10 +217,10 @@ fn readAtom(self: *Self) Error!T.MalAtom {
     if (tok[0] == ';') {
         return .nil;
     }
-    const i = std.fmt.parseInt(i64, tok, 10) catch {
-        return T.MalAtom{ .sym = tok };
-    };
-    return T.MalAtom{ .num = i };
+    if (std.fmt.parseInt(i64, tok, 10)) |i| {
+        return T.MalAtom{ .num = i };
+    } else |_| {}
+    return T.MalAtom{ .sym = tok };
 }
 
 fn readList(self: *Self) Error!?*T.MalList {
