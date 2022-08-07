@@ -1,8 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const types = @import("types.zig");
-const MalType = types.MalType;
-const MalAtom = types.MalAtom;
+const T = @import("types.zig");
 
 allocator: Allocator,
 tokens: std.ArrayList([]const u8),
@@ -36,7 +34,7 @@ fn peek(self: *const Self) ?[]const u8 {
     return self.tokens.items[self.pos];
 }
 
-pub fn readStr(self: *Self, str: []const u8) Error!MalType {
+pub fn readStr(self: *Self, str: []const u8) Error!T.MalType {
     try self.tokenize(str);
     return try self.readForm();
 }
@@ -58,22 +56,23 @@ fn tokenize(self: *Self, str: []const u8) Error!void {
         } else if (std.mem.indexOfScalar(u8, special, str_slice[0]) != null) {
             try self.tokens.append(str_slice[0..1]);
             str_slice = str_slice[1..];
-        }
-        // else if (str_slice[0] == '"') {
-            // var offset: usize = 1;
-            // while (true) {
-                // // if null, unbalanced string
-                // const ind = std.mem.indexOfScalarPos(u8, str_slice, offset, '"') orelse return Error.TokenizeError;
-                // offset = ind;
-                // const cur = str_slice[0..offset];
-                // const wo_esc = std.mem.trimRight(u8, cur, "\\");
-                // if ((cur.len - wo_esc.len) % 2 == 0) break;
-                // offset += 1;
-            // }
-            // try self.tokens.append(str_slice[0 .. offset + 1]);
-            // str_slice = str_slice[offset + 1 ..];
-        // }
-        else if (str_slice[0] == ';') {
+        } else if (str_slice[0] == '"') {
+            var offset: usize = 1;
+            while (true) {
+                // if null, unbalanced string
+                const ind = std.mem.indexOfAnyPos(u8, str_slice, offset, "\"\\") orelse return Error.TokenizeError;
+                offset = ind;
+                switch (str_slice[offset]) {
+                    '\\' => offset += 2,
+                    '"' => {
+                        try self.tokens.append(str_slice[0 .. offset + 1]);
+                        str_slice = str_slice[offset + 1 ..];
+                        break;
+                    },
+                    else => unreachable,
+                }
+            }
+        } else if (str_slice[0] == ';') {
             if (std.mem.indexOfScalar(u8, str_slice, '\n')) |ind| {
                 try self.tokens.append(str_slice[0..ind]);
                 str_slice = str_slice[ind..];
@@ -151,30 +150,42 @@ test "tokenizer" {
                 ")",
             },
         },
-        // .{
-            // .input = "\"a\"",
-            // .expected = &.{
-                // "\"a\"",
-            // },
-        // },
-        // .{
-            // .input = "\"a\\\"\"",
-            // .expected = &.{
-                // "\"a\\\"\"",
-            // },
-        // },
-        // .{
-            // .input = "\\\\",
-            // .expected = &.{
-                // "\\\\",
-            // },
-        // },
-        // .{
-            // .input = "\"\\\\\\\\\"",
-            // .expected = &.{
-                // "\"\\\\\"",
-            // },
-        // },
+        .{
+            // "a"
+            .input = "\"a\"",
+            .expected = &.{
+                "\"a\"",
+            },
+        },
+        .{
+            // "a\""
+            .input = "\"a\\\"\"",
+            .expected = &.{
+                "\"a\\\"\"",
+            },
+        },
+        .{
+            // \\
+            // backslash outside of string is not an escape (?)
+            .input = "\\\\",
+            .expected = &.{
+                "\\\\",
+            },
+        },
+        .{
+            // "\\\""
+            .input = "\"\\\\\\\"\"",
+            .expected = &.{
+                "\"\\\\\\\"\"",
+            },
+        },
+        .{
+            // "\\\\"
+            .input = "\"\\\\\\\\\"",
+            .expected = &.{
+                "\"\\\\\\\\\"",
+            },
+        },
     };
 
     for (cases) |case| {
@@ -189,85 +200,81 @@ test "tokenizer" {
     }
 }
 
-fn readForm(self: *Self) Error!MalType {
+fn readForm(self: *Self) Error!T.MalType {
     if (self.peek()) |tok| {
         if (tok[0] == '(') {
-            if (try self.readList()) |list| {
-                return MalType{ .list = list };
-            } else {
-                return MalType{ .atom = .nil };
-            }
+            return T.MalType{ .list = try self.readList() };
         } else {
-            return MalType{ .atom = try self.readAtom() };
+            return T.MalType{ .atom = try self.readAtom() };
         }
     } else {
-        return MalType{ .atom = .nil };
+        return T.MalType{ .atom = .nil };
     }
 }
 
-fn readAtom(self: *Self) Error!MalAtom {
+fn readAtom(self: *Self) Error!T.MalAtom {
     const tok = self.next() orelse return Error.ParseError;
+    if (tok[0] == ';') {
+        return .nil;
+    }
     const i = std.fmt.parseInt(i64, tok, 10) catch {
-        return MalAtom{ .sym = tok };
+        return T.MalAtom{ .sym = tok };
     };
-    return MalAtom{ .num = i };
+    return T.MalAtom{ .num = i };
 }
 
-fn readList(self: *Self) Error!?[]MalType {
-    const tok_slice = self.tokens.items[self.pos..];
-    const num_child = blk: {
-        var cnt: usize = 0;
-        var depth: usize = 0;
-        for (tok_slice) |tok| {
-            if (depth == 1 and tok[0] != ')') {
-                cnt += 1;
-            }
-            switch (tok[0]) {
-                '(' => depth += 1,
-                ')' => depth -= 1,
-                else => {},
-            }
-            if (depth == 0) {
-                break :blk cnt;
-            }
-        }
-        return Error.ParseError;
-    };
-    // get rid of wrapping parens
+fn readList(self: *Self) Error!?*T.MalList {
+    // first paren
     _ = self.next();
-    defer _ = self.next();
-    if (num_child == 0) return null;
-    var ml = try self.allocator.alloc(MalType, num_child);
-    var i: usize = 0;
-    while (i < num_child) : (i += 1) {
-        ml[i] = try self.readForm();
-    }
-    return ml;
+    return try self.readCdr();
 }
 
-pub fn destroy(self: *Self, form: *const MalType) void {
-    if (std.meta.activeTag(form.*) == .list) {
-        for (form.list) |subform| {
-            self.destroy(&subform);
+fn readCdr(self: *Self) Error!?*T.MalList {
+    if (self.peek()) |tok| {
+        if (tok[0] == ')') {
+            _ = self.next();
+            return null;
         }
-        self.allocator.free(form.list);
+        var ml = try self.allocator.create(T.MalList);
+        ml.*.car = try self.readForm();
+        ml.*.cdr = try self.readCdr();
+        return ml;
+    } else {
+        return Error.ParseError;
     }
 }
 
-fn equal(a: MalType, b: MalType) bool {
+pub fn destroy(self: *Self, form: *const T.MalType) void {
+    if (std.meta.activeTag(form.*) != .list) return;
+    var prev: ?*const T.MalList = undefined;
+    var curr: ?*const T.MalList = form.*.list;
+    while (curr != null) {
+        std.mem.swap(?*const T.MalList, &prev, &curr);
+        curr = prev.?.*.cdr;
+        self.destroy(&prev.?.*.car);
+        self.allocator.destroy(prev.?);
+    }
+}
+
+// move to types
+fn equalList(a: ?*const T.MalList, b: ?*const T.MalList) bool {
+    var x: ?*const T.MalList = a;
+    var y: ?*const T.MalList = b;
+    while (x != null and y != null) {
+        if (!equal(x.?.*.car, y.?.*.car)) return false;
+        x = x.?.*.cdr;
+        y = y.?.*.cdr;
+    }
+    return x == y;
+}
+
+fn equal(a: T.MalType, b: T.MalType) bool {
     const a_tag = std.meta.activeTag(a);
     const b_tag = std.meta.activeTag(b);
     if (a_tag != b_tag) return false;
     switch (a_tag) {
         .list => {
-            const a_len = a.list.len;
-            const b_len = b.list.len;
-            if (a_len != b_len) return false;
-            var i: usize = 0;
-            while (i < a_len) : (i += 1) {
-                if (!equal(a.list[i], b.list[i])) return false;
-            }
-            return true;
+            return equalList(a.list, b.list);
         },
         .atom => {
             const a_atm_tag = std.meta.activeTag(a.atom);
@@ -287,7 +294,7 @@ test "readForm" {
 
     const Case = struct {
         input: []const u8,
-        expected: MalType,
+        expected: T.MalType,
     };
     const cases = [_]Case{
         .{
@@ -310,7 +317,7 @@ test "readForm" {
             .input = "(1)",
             .expected = .{
                 .list = &.{
-                    .{ .atom = .{ .num = 1 } },
+                    .car = .{ .atom = .{ .num = 1 } },
                 },
             },
         },
@@ -318,8 +325,10 @@ test "readForm" {
             .input = "(1 2)",
             .expected = .{
                 .list = &.{
-                    .{ .atom = .{ .num = 1 } },
-                    .{ .atom = .{ .num = 2 } },
+                    .car = .{ .atom = .{ .num = 1 } },
+                    .cdr = &.{
+                        .car = .{ .atom = .{ .num = 2 } },
+                    },
                 },
             },
         },
@@ -327,10 +336,12 @@ test "readForm" {
             .input = "(1 (2))",
             .expected = .{
                 .list = &.{
-                    .{ .atom = .{ .num = 1 } },
-                    .{
-                        .list = &.{
-                            .{ .atom = .{ .num = 2 } },
+                    .car = .{ .atom = .{ .num = 1 } },
+                    .cdr = &.{
+                        .car = .{
+                            .list = &.{
+                                .car = .{ .atom = .{ .num = 2 } },
+                            },
                         },
                     },
                 },
@@ -340,20 +351,30 @@ test "readForm" {
             .input = "(1 (2) 3 (four (5 6)))",
             .expected = .{
                 .list = &.{
-                    .{ .atom = .{ .num = 1 } },
-                    .{
-                        .list = &.{
-                            .{ .atom = .{ .num = 2 } },
+                    .car = .{ .atom = .{ .num = 1 } },
+                    .cdr = &.{
+                        .car = .{
+                            .list = &.{
+                                .car = .{ .atom = .{ .num = 2 } },
+                            },
                         },
-                    },
-                    .{ .atom = .{ .num = 3 } },
-                    .{
-                        .list = &.{
-                            .{ .atom = .{ .sym = "four" } },
-                            .{
-                                .list = &.{
-                                    .{ .atom = .{ .num = 5 } },
-                                    .{ .atom = .{ .num = 6 } },
+                        .cdr = &.{
+                            .car = .{ .atom = .{ .num = 3 } },
+                            .cdr = &.{
+                                .car = .{
+                                    .list = &.{
+                                        .car = .{ .atom = .{ .sym = "four" } },
+                                        .cdr = &.{
+                                            .car = .{
+                                                .list = &.{
+                                                    .car = .{ .atom = .{ .num = 5 } },
+                                                    .cdr = &.{
+                                                        .car = .{ .atom = .{ .num = 6 } },
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
                                 },
                             },
                         },
@@ -365,16 +386,22 @@ test "readForm" {
             .input = "(() 3 () ())",
             .expected = .{
                 .list = &.{
-                    .{ .atom = .nil },
-                    .{ .atom = .{ .num = 3 } },
-                    .{ .atom = .nil },
-                    .{ .atom = .nil },
+                    .car = .{ .list = null },
+                    .cdr = &.{
+                        .car = .{ .atom = .{ .num = 3 } },
+                        .cdr = &.{
+                            .car = .{ .list = null },
+                            .cdr = &.{
+                                .car = .{ .list = null },
+                            },
+                        },
+                    },
                 },
             },
         },
         .{
             .input = "()",
-            .expected = .{ .atom = .nil },
+            .expected = .{ .list = null },
         },
     };
 
@@ -384,9 +411,14 @@ test "readForm" {
         const res = try reader.readForm();
         defer reader.destroy(&res);
         std.testing.expect(equal(exp, res)) catch |err| {
+            const stderr = std.io.getStdErr().writer();
+            const Printer = @import("printer.zig").Printer(@TypeOf(stderr));
+            var printer = Printer.init(stderr);
             std.debug.print("\nINPUT:\n{s}\n\n", .{cases[i].input});
-            std.debug.print("EXPECTED:\n{}\nGOT:\n{}\n\n", .{ exp, res });
-            std.debug.print("EXPECTED:\n{}\nGOT:\n{}\n\n", .{ exp.list[3], res.list[3] });
+            std.debug.print("EXPECTED:\n", .{});
+            try printer.prStr(exp);
+            std.debug.print("GOT:\n", .{});
+            try printer.prStr(res);
             return err;
         };
     }

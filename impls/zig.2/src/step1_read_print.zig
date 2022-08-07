@@ -6,6 +6,7 @@ const Printer = @import("printer.zig").Printer;
 pub fn main() anyerror!void {
     const stdin = std.io.getStdIn().reader();
     const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
     var reader = Reader.init(std.testing.allocator);
     defer reader.deinit();
     var printer = Printer(@TypeOf(stdout)).init(stdout);
@@ -13,7 +14,10 @@ pub fn main() anyerror!void {
     while (true) {
         try stdout.print("user> ", .{});
         const input = (try stdin.readUntilDelimiterOrEof(&buf, '\n')) orelse break;
-        const read = try READ(input, &reader);
+        const read = READ(input, &reader) catch {
+            try stderr.print("Reached EOF. Check for unbalanced tokens.\n", .{});
+            continue;
+        };
         defer reader.destroy(&read);
         const eval = EVAL(read);
         try PRINT(eval, printer);

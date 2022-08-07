@@ -20,13 +20,7 @@ pub fn Printer(comptime Writer: type) type {
             switch (form) {
                 .list => {
                     try self.writer.print("(", .{});
-                    for (form.list) |subform, i| {
-                        if (i != 0) {
-                            try self.writer.print(" ", .{});
-                        }
-                        try self.prStrNonRoot(subform);
-                    }
-                    try self.writer.print(")", .{});
+                    try self.prListCdr(form.list);
                 },
                 .atom => {
                     switch (form.atom) {
@@ -38,9 +32,22 @@ pub fn Printer(comptime Writer: type) type {
                         },
                         .num => {
                             try self.writer.print("{}", .{form.atom.num});
-                        }
+                        },
                     }
+                },
+            }
+        }
+
+        fn prListCdr(self: *const Self, cdr: ?*const types.MalList) Error!void {
+            if (cdr) |cdr_v| {
+                try self.prStrNonRoot(cdr_v.*.car);
+                const n_cdr = cdr_v.*.cdr;
+                if (n_cdr != null) {
+                    try self.writer.print(" ", .{});
                 }
+                try self.prListCdr(n_cdr);
+            } else {
+                try self.writer.print(")", .{});
             }
         }
     };
