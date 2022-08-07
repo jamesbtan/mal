@@ -3,99 +3,78 @@ const Allocator = std.mem.Allocator;
 const T = @import("types.zig");
 
 allocator: Allocator,
-tokens: std.ArrayList([]const u8),
-pos: usize = 0,
 
-const Self = @This();
 pub const Error = error{
     TokenizeError,
     ParseError,
 } || Allocator.Error;
 
-pub fn init(allocator: Allocator) Self {
+pub fn init(allocator: Allocator) @This() {
     return .{
         .allocator = allocator,
-        .tokens = std.ArrayList([]const u8).init(allocator),
     };
 }
 
-pub fn deinit(self: *Self) void {
-    self.tokens.deinit();
+pub fn readStr(self: *@This(), str: []const u8) Error!T.MalType {
+    var tok_iter = tokenizer(str);
+    return try readForm(&tok_iter, self.allocator);
 }
 
-fn next(self: *Self) ?[]const u8 {
-    if (self.pos == self.tokens.items.len) return null;
-    defer self.pos += 1;
-    return self.tokens.items[self.pos];
-}
+const TokenIterator = struct {
+    str_slice: []const u8,
 
-fn peek(self: *const Self) ?[]const u8 {
-    if (self.pos == self.tokens.items.len) return null;
-    return self.tokens.items[self.pos];
-}
+    pub fn next(self: *@This()) Error!?[]const u8 {
+        const slice = (try self.peek()) orelse return null;
+        self.str_slice = self.str_slice[slice.len..];
+        return slice;
+    }
 
-pub fn readStr(self: *Self, str: []const u8) Error!T.MalType {
-    try self.tokenize(str);
-    return try self.readForm();
-}
-
-// TODO: deduplicate all this junk..
-fn tokenize(self: *Self, str: []const u8) Error!void {
-    self.tokens.clearRetainingCapacity();
-    self.pos = 0;
-    var str_slice = str;
-    const allsym = "[]{}()'`~^@, \t\n\r";
-    const special = allsym[0..11];
-    const whitespace = allsym[11..];
-    while (str_slice.len > 0) {
-        if (std.mem.indexOfScalar(u8, whitespace, str_slice[0]) != null) {
-            str_slice = std.mem.trimLeft(u8, str_slice, whitespace);
-        } else if (str_slice.len >= 2 and std.mem.eql(u8, str_slice[0..2], "~@")) {
-            try self.tokens.append(str_slice[0..2]);
-            str_slice = str_slice[2..];
-        } else if (std.mem.indexOfScalar(u8, special, str_slice[0]) != null) {
-            try self.tokens.append(str_slice[0..1]);
-            str_slice = str_slice[1..];
-        } else if (str_slice[0] == '"') {
+    pub fn peek(self: *@This()) Error!?[]const u8 {
+        const allsym = "[]{}()'`~^@, \t\n\r";
+        const special = allsym[0..11];
+        const whitespace = allsym[11..];
+        self.str_slice = std.mem.trimLeft(u8, self.str_slice, whitespace);
+        if (self.str_slice.len == 0) {
+            return null;
+        } else if (self.str_slice.len >= 2 and std.mem.eql(u8, self.str_slice[0..2], "~@")) {
+            return self.str_slice[0..2];
+        } else if (std.mem.indexOfScalar(u8, special, self.str_slice[0]) != null) {
+            return self.str_slice[0..1];
+        } else if (self.str_slice[0] == '"') {
             var offset: usize = 1;
             while (true) {
                 // if null, unbalanced string
-                const ind = std.mem.indexOfAnyPos(u8, str_slice, offset, "\"\\") orelse return Error.TokenizeError;
+                const ind = std.mem.indexOfAnyPos(u8, self.str_slice, offset, "\"\\") orelse return Error.TokenizeError;
                 offset = ind;
-                switch (str_slice[offset]) {
+                switch (self.str_slice[offset]) {
                     '\\' => offset += 2,
                     '"' => {
-                        try self.tokens.append(str_slice[0 .. offset + 1]);
-                        str_slice = str_slice[offset + 1 ..];
-                        break;
+                        return self.str_slice[0 .. offset + 1];
                     },
                     else => unreachable,
                 }
             }
-        } else if (str_slice[0] == ';') {
-            if (std.mem.indexOfScalar(u8, str_slice, '\n')) |ind| {
-                try self.tokens.append(str_slice[0..ind]);
-                str_slice = str_slice[ind..];
+        } else if (self.str_slice[0] == ';') { // last 2 are similar?
+            if (std.mem.indexOfScalar(u8, self.str_slice, '\n')) |ind| {
+                return self.str_slice[0..ind];
             } else {
-                try self.tokens.append(str_slice[0..]);
-                str_slice = str_slice[str_slice.len..];
+                return self.str_slice[0..];
             }
         } else {
-            if (std.mem.indexOfAny(u8, str_slice, allsym)) |ind| {
-                try self.tokens.append(str_slice[0..ind]);
-                str_slice = str_slice[ind..];
+            if (std.mem.indexOfAny(u8, self.str_slice, allsym)) |ind| {
+                return self.str_slice[0..ind];
             } else {
-                try self.tokens.append(str_slice[0..]);
-                str_slice = str_slice[str_slice.len..];
+                return self.str_slice[0..];
             }
         }
     }
+};
+
+fn tokenizer(str: []const u8) TokenIterator {
+    return .{ .str_slice = str };
 }
 
 test "tokenizer" {
-    var reader = Self.init(std.testing.allocator);
-    defer reader.deinit();
-
     const Case = struct {
         input: []const u8,
         expected: []const []const u8,
@@ -189,31 +168,32 @@ test "tokenizer" {
     };
 
     for (cases) |case| {
-        try reader.tokenize(case.input);
-
         const exp = case.expected;
-        const res = reader.tokens.items;
-        try std.testing.expectEqual(exp.len, res.len);
-        for (exp) |_, i| {
-            try std.testing.expectEqualStrings(exp[i], res[i]);
+
+        var tok_iter = tokenizer(case.input);
+        var i: usize = 0;
+        while (i < exp.len) : (i += 1) {
+            const tok = (try tok_iter.next()) orelse break;
+            try std.testing.expectEqualStrings(exp[i], tok);
         }
+        try std.testing.expectEqual(@as(?[]const u8, null), try tok_iter.next());
+        try std.testing.expectEqual(i, exp.len);
     }
 }
 
-fn readForm(self: *Self) Error!T.MalType {
-    if (self.peek()) |tok| {
+fn readForm(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalType {
+    if (try tok_iter.next()) |tok| {
         if (tok[0] == '(') {
-            return T.MalType{ .list = try self.readList() };
+            return T.MalType{ .list = try readList(tok_iter, alloc) };
         } else {
-            return T.MalType{ .atom = try self.readAtom() };
+            return T.MalType{ .atom = try readAtom(tok) };
         }
     } else {
         return T.MalType{ .atom = .nil };
     }
 }
 
-fn readAtom(self: *Self) Error!T.MalAtom {
-    const tok = self.next() orelse return Error.ParseError;
+fn readAtom(tok: []const u8) Error!T.MalAtom {
     if (tok[0] == ';') {
         return .nil;
     }
@@ -223,28 +203,22 @@ fn readAtom(self: *Self) Error!T.MalAtom {
     return T.MalAtom{ .sym = tok };
 }
 
-fn readList(self: *Self) Error!?*T.MalList {
-    // first paren
-    _ = self.next();
-    return try self.readCdr();
-}
-
-fn readCdr(self: *Self) Error!?*T.MalList {
-    if (self.peek()) |tok| {
+fn readList(tok_iter: *TokenIterator, alloc: Allocator) Error!?*T.MalList {
+    if (try tok_iter.peek()) |tok| {
         if (tok[0] == ')') {
-            _ = self.next();
+            _ = try tok_iter.next();
             return null;
         }
-        var ml = try self.allocator.create(T.MalList);
-        ml.*.car = try self.readForm();
-        ml.*.cdr = try self.readCdr();
+        var ml = try alloc.create(T.MalList);
+        ml.*.car = try readForm(tok_iter, alloc);
+        ml.*.cdr = try readList(tok_iter, alloc);
         return ml;
     } else {
         return Error.ParseError;
     }
 }
 
-pub fn destroy(self: *Self, form: *const T.MalType) void {
+pub fn destroy(self: *@This(), form: *const T.MalType) void {
     if (std.meta.activeTag(form.*) != .list) return;
     var prev: ?*const T.MalList = undefined;
     var curr: ?*const T.MalList = form.*.list;
@@ -289,8 +263,7 @@ fn equal(a: T.MalType, b: T.MalType) bool {
 }
 
 test "readForm" {
-    var reader = Self.init(std.testing.allocator);
-    defer reader.deinit();
+    var reader = @This().init(std.testing.allocator);
 
     const Case = struct {
         input: []const u8,
@@ -404,11 +377,9 @@ test "readForm" {
             .expected = .{ .list = null },
         },
     };
-
     for (cases) |case, i| {
-        try reader.tokenize(case.input);
         const exp = case.expected;
-        const res = try reader.readForm();
+        const res = try reader.readStr(case.input);
         defer reader.destroy(&res);
         std.testing.expect(equal(exp, res)) catch |err| {
             const stderr = std.io.getStdErr().writer();
@@ -423,3 +394,4 @@ test "readForm" {
         };
     }
 }
+
