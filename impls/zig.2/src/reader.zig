@@ -23,7 +23,7 @@ pub fn init(allocator: Allocator) Self {
 
 pub fn readStr(self: *Self, str: []const u8) Error!T.MalType {
     var tok_iter = tokenizer(str);
-    return try readForm(&tok_iter, self.allocator);
+    return try self.readForm(&tok_iter);
 }
 
 const TokenIterator = struct {
@@ -202,12 +202,12 @@ test "tokenizer" {
     }
 }
 
-fn readForm(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalType {
+fn readForm(self: *const Self, tok_iter: *TokenIterator) Error!T.MalType {
     if (try tok_iter.peek()) |tok| {
         switch (tok[0]) {
             '(' => {
                 _ = try tok_iter.next();
-                return T.MalType{ .list = try readList(tok_iter, alloc) };
+                return T.MalType{ .list = try self.readList(tok_iter) };
             },
             '\'', '`', '~', '@' => |c| {
                 _ = try tok_iter.next();
@@ -224,33 +224,33 @@ fn readForm(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalType {
                         };
                     }
                 };
-                const form = try readForm(tok_iter, alloc);
-                errdefer T.destroy(&form, alloc);
+                const form = try self.readForm(tok_iter);
+                errdefer T.destroy(&form, self.allocator);
                 const ml = try T.MalList.construct(&[_]T.MalType{
                     form, .{ .atom = .{ .sym = sym } },
-                }, alloc);
+                }, self.allocator);
                 errdefer T.destroy(ml, alloc);
                 return T.MalType{ .list = ml };
             },
             '^' => {
                 _ = try tok_iter.next();
-                const meta = try readForm(tok_iter, alloc);
-                errdefer T.destroy(&meta, alloc);
-                const form = try readForm(tok_iter, alloc);
-                errdefer T.destroy(&form, alloc);
+                const meta = try self.readForm(tok_iter);
+                errdefer T.destroy(&meta, self.allocator);
+                const form = try self.readForm(tok_iter);
+                errdefer T.destroy(&form, self.allocator);
                 const ml = try T.MalList.construct(&[_]T.MalType{
                     meta, form, .{ .atom = .{ .sym = "with-meta" } },
-                }, alloc);
+                }, self.allocator);
                 return T.MalType{ .list = ml };
             },
-            else => return T.MalType{ .atom = try readAtom(tok_iter, alloc) },
+            else => return T.MalType{ .atom = try self.readAtom(tok_iter) },
         }
     } else {
         return T.MalType{ .atom = .nil };
     }
 }
 
-fn readAtom(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalAtom {
+fn readAtom(self: *const Self, tok_iter: *TokenIterator) Error!T.MalAtom {
     const tok = (try tok_iter.next()) orelse return ParseError.EndOfTokens;
     switch (tok[0]) {
         ';' => return .nil,
@@ -259,8 +259,8 @@ fn readAtom(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalAtom {
             return T.MalAtom{ .keyword = tok };
         },
         '"' => return T.MalAtom{ .str = tok },
-        '[' => return T.MalAtom{ .vector = try readVec(tok_iter, alloc) },
-        '{' => return T.MalAtom{ .hash = try readHash(tok_iter, alloc) },
+        '[' => return T.MalAtom{ .vector = try self.readVec(tok_iter) },
+        '{' => return T.MalAtom{ .hash = try self.readHash(tok_iter) },
         else => {},
     }
     if (std.mem.eql(u8, "true", tok)) {
@@ -274,9 +274,9 @@ fn readAtom(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalAtom {
     }
 }
 
-fn readVec(tok_iter: *TokenIterator, alloc: Allocator) Error!std.ArrayList(T.MalType) {
-    var vec = std.ArrayList(T.MalType).init(alloc);
-    errdefer T.destroyVec(vec, alloc);
+fn readVec(self: *const Self, tok_iter: *TokenIterator) Error!std.ArrayList(T.MalType) {
+    var vec = std.ArrayList(T.MalType).init(self.allocator);
+    errdefer T.destroyVec(vec, self.allocator);
 
     while (try tok_iter.peek()) |tok| {
         switch (tok[0]) {
@@ -286,7 +286,7 @@ fn readVec(tok_iter: *TokenIterator, alloc: Allocator) Error!std.ArrayList(T.Mal
             },
             ')', '}' => return ParseError.MismatchBrace,
             else => {
-                try vec.append(try readForm(tok_iter, alloc));
+                try vec.append(try self.readForm(tok_iter));
             },
         }
     } else {
@@ -295,10 +295,10 @@ fn readVec(tok_iter: *TokenIterator, alloc: Allocator) Error!std.ArrayList(T.Mal
     return vec;
 }
 
-fn readHash(tok_iter: *TokenIterator, alloc: Allocator) Error!std.StringHashMap(T.MalType) {
+fn readHash(self: *const Self, tok_iter: *TokenIterator) Error!std.StringHashMap(T.MalType) {
     _ = tok_iter;
-    var hash = std.StringHashMap(T.MalType).init(alloc);
-    errdefer T.destroyHash(&hash, alloc);
+    var hash = std.StringHashMap(T.MalType).init(self.allocator);
+    errdefer T.destroyHash(&hash, self.allocator);
 
     while (try tok_iter.peek()) |tok| {
         switch (tok[0]) {
@@ -309,12 +309,12 @@ fn readHash(tok_iter: *TokenIterator, alloc: Allocator) Error!std.StringHashMap(
             ')', ']' => return ParseError.MismatchBrace,
             else => {},
         }
-        const key = try readForm(tok_iter, alloc);
+        const key = try self.readForm(tok_iter);
         switch (key) {
             .atom => |a| {
                 switch (a) {
                     .str, .keyword => |s| {
-                        const value = try readForm(tok_iter, alloc);
+                        const value = try self.readForm(tok_iter);
                         const entry = try hash.getOrPut(s);
                         if (entry.found_existing) {
                             return ParseError.InvalidKey;
@@ -334,7 +334,7 @@ fn readHash(tok_iter: *TokenIterator, alloc: Allocator) Error!std.StringHashMap(
     return hash;
 }
 
-fn readList(tok_iter: *TokenIterator, alloc: Allocator) Error!?*T.MalList {
+fn readList(self: *const Self, tok_iter: *TokenIterator) Error!?*T.MalList {
     if (try tok_iter.peek()) |tok| {
         switch (tok[0]) {
             ')' => {
@@ -344,12 +344,12 @@ fn readList(tok_iter: *TokenIterator, alloc: Allocator) Error!?*T.MalList {
             ']', '}' => return ParseError.MismatchBrace,
             else => {},
         }
-        const form = try readForm(tok_iter, alloc);
-        errdefer T.destroy(&form, alloc);
+        const form = try self.readForm(tok_iter);
+        errdefer T.destroy(&form, self.allocator);
         // TODO rewrite direct recursion
-        const sublist = try readList(tok_iter, alloc);
-        errdefer T.destroyList(sublist, alloc);
-        const ml = try T.MalList.allocPair(form, sublist, alloc);
+        const sublist = try self.readList(tok_iter);
+        errdefer T.destroyList(sublist, self.allocator);
+        const ml = try T.MalList.allocPair(form, sublist, self.allocator);
         return ml;
     } else {
         return ParseError.EndOfTokens;
