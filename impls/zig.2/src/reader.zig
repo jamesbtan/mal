@@ -81,6 +81,7 @@ const TokenIterator = struct {
                 self.memo = self.str_slice[0..];
             }
         }
+
         return self.memo;
     }
 
@@ -201,13 +202,62 @@ test "tokenizer" {
     }
 }
 
+// TODO clean up the list creation stuff...
 fn readForm(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalType {
     if (try tok_iter.peek()) |tok| {
-        if (tok[0] == '(') {
-            _ = try tok_iter.next();
-            return T.MalType{ .list = try readList(tok_iter, alloc) };
-        } else {
-            return T.MalType{ .atom = try readAtom(tok_iter, alloc) };
+        switch (tok[0]) {
+            '(' => {
+                _ = try tok_iter.next();
+                return T.MalType{ .list = try readList(tok_iter, alloc) };
+            },
+            '\'', '`', '~', '@' => |c| {
+                _ = try tok_iter.next();
+                const sym = blk: {
+                    if (std.mem.eql(u8, tok, "~@")) {
+                        break :blk "splice-unquote";
+                    } else {
+                        break :blk switch (c) {
+                            '\'' => "quote",
+                            '`' => "quasiquote",
+                            '~' => "unquote",
+                            '@' => "deref",
+                            else => unreachable,
+                        };
+                    }
+                };
+                const form = try readForm(tok_iter, alloc);
+                errdefer destroy(&form, alloc);
+                var cdr = try alloc.create(T.MalList);
+                errdefer alloc.destroy(cdr);
+                cdr.car = form;
+                cdr.cdr = null;
+                var ml = try alloc.create(T.MalList);
+                errdefer alloc.destroy(ml);
+                ml.car = .{ .atom = .{ .sym = sym } };
+                ml.cdr = cdr;
+                return T.MalType{ .list = ml };
+            },
+            '^' => {
+                _ = try tok_iter.next();
+                const meta = try readForm(tok_iter, alloc);
+                errdefer destroy(&meta, alloc);
+                const form = try readForm(tok_iter, alloc);
+                errdefer destroy(&form, alloc);
+                var meta_l = try alloc.create(T.MalList);
+                errdefer alloc.destroy(meta_l);
+                meta_l.car = meta;
+                meta_l.cdr = null;
+                var form_l = try alloc.create(T.MalList);
+                errdefer alloc.destroy(form_l);
+                form_l.car = form;
+                form_l.cdr = meta_l;
+                var ml = try alloc.create(T.MalList);
+                errdefer alloc.destroy(ml);
+                ml.car = .{ .atom = .{ .sym = "with-meta" } };
+                ml.cdr = form_l;
+                return T.MalType{ .list = ml };
+            },
+            else => return T.MalType{ .atom = try readAtom(tok_iter, alloc) },
         }
     } else {
         return T.MalType{ .atom = .nil };
@@ -310,11 +360,11 @@ fn readList(tok_iter: *TokenIterator, alloc: Allocator) Error!?*T.MalList {
         }
         var ml = try alloc.create(T.MalList);
         errdefer {
-            ml.*.cdr = null;
+            ml.cdr = null;
             destroyList(ml, alloc);
         }
-        ml.*.car = try readForm(tok_iter, alloc);
-        ml.*.cdr = try readList(tok_iter, alloc);
+        ml.car = try readForm(tok_iter, alloc);
+        ml.cdr = try readList(tok_iter, alloc);
         return ml;
     } else {
         return ParseError.EndOfTokens;
@@ -335,8 +385,8 @@ pub fn destroy(form: *const T.MalType, alloc: Allocator) void {
 fn destroyList(list: ?*const T.MalList, alloc: Allocator) void {
     var curr = list;
     while (curr != null) {
-        const next = curr.?.*.cdr;
-        destroy(&curr.?.*.car, alloc);
+        const next = curr.?.cdr;
+        destroy(&curr.?.car, alloc);
         alloc.destroy(curr.?);
         curr = next;
     }
@@ -358,7 +408,7 @@ fn destroyHash(hash: *const std.StringHashMap(T.MalType), alloc: Allocator) void
     hash_ptr.deinit();
 }
 
-// move to types
+// TODO move to types
 fn equal(a: T.MalType, b: T.MalType) bool {
     const a_tag = std.meta.activeTag(a);
     const b_tag = std.meta.activeTag(b);
@@ -369,7 +419,7 @@ fn equal(a: T.MalType, b: T.MalType) bool {
             const b_atm_tag = std.meta.activeTag(b.atom);
             if (a_atm_tag != b_atm_tag) return false;
             switch (a_atm_tag) {
-                .sym, .keyword => return std.mem.eql(u8, a.atom.sym, b.atom.sym),
+                .sym, .str, .keyword => return std.mem.eql(u8, a.atom.sym, b.atom.sym),
                 else => return std.meta.eql(a, b),
             }
         },
@@ -383,9 +433,9 @@ fn equalList(a: ?*const T.MalList, b: ?*const T.MalList) bool {
     var x: ?*const T.MalList = a;
     var y: ?*const T.MalList = b;
     while (x != null and y != null) {
-        if (!equal(x.?.*.car, y.?.*.car)) return false;
-        x = x.?.*.cdr;
-        y = y.?.*.cdr;
+        if (!equal(x.?.car, y.?.car)) return false;
+        x = x.?.cdr;
+        y = y.?.cdr;
     }
     return x == y;
 }
@@ -503,6 +553,21 @@ test "readForm - basic tests" {
         .{
             .input = "()",
             .expected = .{ .list = null },
+        },
+        .{
+            .input = "~@(1)",
+            .expected = .{
+                .list = &.{
+                    .car = .{ .atom = .{ .sym = "splice-unquote" } },
+                    .cdr = &.{
+                        .car = .{
+                            .list = &.{
+                                .car = .{ .atom = .{ .num = 1 } },
+                            },
+                        },
+                    },
+                },
+            },
         },
     };
     for (cases) |case, i| {

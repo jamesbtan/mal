@@ -23,8 +23,8 @@ pub fn Printer(comptime Writer: type) type {
                     try self.writer.print("(", .{});
                     try self.prListCdr(form.list);
                 },
-                .atom => {
-                    switch (form.atom) {
+                .atom => |a| {
+                    switch (a) {
                         .nil => {
                             try self.writer.print("NIL", .{});
                         },
@@ -70,8 +70,8 @@ pub fn Printer(comptime Writer: type) type {
 
         fn prListCdr(self: *const Self, cdr: ?*const types.MalList) Error!void {
             if (cdr) |cdr_v| {
-                try self.prStrNonRoot(cdr_v.*.car);
-                const n_cdr = cdr_v.*.cdr;
+                try self.prStrNonRoot(cdr_v.car);
+                const n_cdr = cdr_v.cdr;
                 if (n_cdr != null) {
                     try self.writer.print(" ", .{});
                 }
