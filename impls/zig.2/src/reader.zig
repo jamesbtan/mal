@@ -202,7 +202,6 @@ test "tokenizer" {
     }
 }
 
-// TODO clean up the list creation stuff...
 fn readForm(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalType {
     if (try tok_iter.peek()) |tok| {
         switch (tok[0]) {
@@ -226,35 +225,22 @@ fn readForm(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalType {
                     }
                 };
                 const form = try readForm(tok_iter, alloc);
-                errdefer destroy(&form, alloc);
-                var cdr = try alloc.create(T.MalList);
-                errdefer alloc.destroy(cdr);
-                cdr.car = form;
-                cdr.cdr = null;
-                var ml = try alloc.create(T.MalList);
-                errdefer alloc.destroy(ml);
-                ml.car = .{ .atom = .{ .sym = sym } };
-                ml.cdr = cdr;
+                errdefer T.destroy(&form, alloc);
+                const ml = try T.MalList.construct(&[_]T.MalType{
+                    form, .{ .atom = .{ .sym = sym } },
+                }, alloc);
+                errdefer T.destroy(ml, alloc);
                 return T.MalType{ .list = ml };
             },
             '^' => {
                 _ = try tok_iter.next();
                 const meta = try readForm(tok_iter, alloc);
-                errdefer destroy(&meta, alloc);
+                errdefer T.destroy(&meta, alloc);
                 const form = try readForm(tok_iter, alloc);
-                errdefer destroy(&form, alloc);
-                var meta_l = try alloc.create(T.MalList);
-                errdefer alloc.destroy(meta_l);
-                meta_l.car = meta;
-                meta_l.cdr = null;
-                var form_l = try alloc.create(T.MalList);
-                errdefer alloc.destroy(form_l);
-                form_l.car = form;
-                form_l.cdr = meta_l;
-                var ml = try alloc.create(T.MalList);
-                errdefer alloc.destroy(ml);
-                ml.car = .{ .atom = .{ .sym = "with-meta" } };
-                ml.cdr = form_l;
+                errdefer T.destroy(&form, alloc);
+                const ml = try T.MalList.construct(&[_]T.MalType{
+                    meta, form, .{ .atom = .{ .sym = "with-meta" } },
+                }, alloc);
                 return T.MalType{ .list = ml };
             },
             else => return T.MalType{ .atom = try readAtom(tok_iter, alloc) },
@@ -290,8 +276,7 @@ fn readAtom(tok_iter: *TokenIterator, alloc: Allocator) Error!T.MalAtom {
 
 fn readVec(tok_iter: *TokenIterator, alloc: Allocator) Error!std.ArrayList(T.MalType) {
     var vec = std.ArrayList(T.MalType).init(alloc);
-    // replace shallow with deep destroy
-    errdefer destroyVec(vec, alloc);
+    errdefer T.destroyVec(vec, alloc);
 
     while (try tok_iter.peek()) |tok| {
         switch (tok[0]) {
@@ -300,9 +285,10 @@ fn readVec(tok_iter: *TokenIterator, alloc: Allocator) Error!std.ArrayList(T.Mal
                 break;
             },
             ')', '}' => return ParseError.MismatchBrace,
-            else => {},
+            else => {
+                try vec.append(try readForm(tok_iter, alloc));
+            },
         }
-        try vec.append(try readForm(tok_iter, alloc));
     } else {
         return ParseError.EndOfTokens;
     }
@@ -312,7 +298,7 @@ fn readVec(tok_iter: *TokenIterator, alloc: Allocator) Error!std.ArrayList(T.Mal
 fn readHash(tok_iter: *TokenIterator, alloc: Allocator) Error!std.StringHashMap(T.MalType) {
     _ = tok_iter;
     var hash = std.StringHashMap(T.MalType).init(alloc);
-    errdefer destroyHash(&hash, alloc);
+    errdefer T.destroyHash(&hash, alloc);
 
     while (try tok_iter.peek()) |tok| {
         switch (tok[0]) {
@@ -358,86 +344,16 @@ fn readList(tok_iter: *TokenIterator, alloc: Allocator) Error!?*T.MalList {
             ']', '}' => return ParseError.MismatchBrace,
             else => {},
         }
-        var ml = try alloc.create(T.MalList);
-        errdefer {
-            ml.cdr = null;
-            destroyList(ml, alloc);
-        }
-        ml.car = try readForm(tok_iter, alloc);
-        ml.cdr = try readList(tok_iter, alloc);
+        const form = try readForm(tok_iter, alloc);
+        errdefer T.destroy(&form, alloc);
+        // TODO rewrite direct recursion
+        const sublist = try readList(tok_iter, alloc);
+        errdefer T.destroyList(sublist, alloc);
+        const ml = try T.MalList.allocPair(form, sublist, alloc);
         return ml;
     } else {
         return ParseError.EndOfTokens;
     }
-}
-
-pub fn destroy(form: *const T.MalType, alloc: Allocator) void {
-    switch (form.*) {
-        .list => |l| destroyList(l, alloc),
-        .atom => |a| switch (a) {
-            .vector => |v| destroyVec(v, alloc),
-            .hash => |h| destroyHash(&h, alloc),
-            else => {},
-        },
-    }
-}
-
-fn destroyList(list: ?*const T.MalList, alloc: Allocator) void {
-    var curr = list;
-    while (curr != null) {
-        const next = curr.?.cdr;
-        destroy(&curr.?.car, alloc);
-        alloc.destroy(curr.?);
-        curr = next;
-    }
-}
-
-fn destroyVec(vec: std.ArrayList(T.MalType), alloc: Allocator) void {
-    for (vec.items) |e| {
-        destroy(&e, alloc);
-    }
-    vec.deinit();
-}
-
-fn destroyHash(hash: *const std.StringHashMap(T.MalType), alloc: Allocator) void {
-    var v_iter = hash.valueIterator();
-    while (v_iter.next()) |v| {
-        destroy(v, alloc);
-    }
-    const hash_ptr = @intToPtr(*std.StringHashMap(T.MalType), @ptrToInt(hash));
-    hash_ptr.deinit();
-}
-
-// TODO move to types
-fn equal(a: T.MalType, b: T.MalType) bool {
-    const a_tag = std.meta.activeTag(a);
-    const b_tag = std.meta.activeTag(b);
-    if (a_tag != b_tag) return false;
-    switch (a_tag) {
-        .atom => {
-            const a_atm_tag = std.meta.activeTag(a.atom);
-            const b_atm_tag = std.meta.activeTag(b.atom);
-            if (a_atm_tag != b_atm_tag) return false;
-            switch (a_atm_tag) {
-                .sym, .str, .keyword => return std.mem.eql(u8, a.atom.sym, b.atom.sym),
-                else => return std.meta.eql(a, b),
-            }
-        },
-        .list => {
-            return equalList(a.list, b.list);
-        },
-    }
-}
-
-fn equalList(a: ?*const T.MalList, b: ?*const T.MalList) bool {
-    var x: ?*const T.MalList = a;
-    var y: ?*const T.MalList = b;
-    while (x != null and y != null) {
-        if (!equal(x.?.car, y.?.car)) return false;
-        x = x.?.cdr;
-        y = y.?.cdr;
-    }
-    return x == y;
 }
 
 test "readForm - basic tests" {
@@ -573,8 +489,8 @@ test "readForm - basic tests" {
     for (cases) |case, i| {
         const exp = case.expected;
         const res = try reader.readStr(case.input);
-        defer destroy(&res, reader.allocator);
-        std.testing.expect(equal(exp, res)) catch |err| {
+        defer T.destroy(&res, reader.allocator);
+        std.testing.expect(T.equal(exp, res)) catch |err| {
             const stderr = std.io.getStdErr().writer();
             const Printer = @import("printer.zig").Printer(@TypeOf(stderr));
             var printer = Printer.init(stderr);
@@ -675,5 +591,5 @@ test "hash - leak detection" {
     var reader = Self.init(std.testing.allocator);
 
     const res = try reader.readStr("{:a {:b {:c 3}}}");
-    defer destroy(&res, reader.allocator);
+    defer T.destroy(&res, reader.allocator);
 }
